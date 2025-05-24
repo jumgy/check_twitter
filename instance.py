@@ -18,6 +18,10 @@ import json
 import os
 from datetime import datetime, timedelta
 import urllib.parse
+import inspect
+import asyncio
+import logging
+import re
 
 from src.model.dusted.browser_login import dusted_browser_login
 from src.model.help.captcha import Capsolver, Solvium
@@ -532,65 +536,31 @@ class Dusted:
             logger.error(f"[{self.account_index}] Error agreeing to TOS: {e}")
             raise e
 
-
-    @staticmethod
-    async def _body_preview(resp, limit: int = 250) -> str:
-        try:
-            # httpx / requests: resp.text ‒ str.  aiohttp: resp.text() ‒ coroutine
-            txt_attr = getattr(resp, "text", None)
-            if txt_attr is None:
-                return "<no body>"
-            if callable(txt_attr):                     # aiohttp
-                txt = await resp.text()
-            else:                                      # httpx / requests
-                txt = resp.text
-            txt = txt.replace("\n", " ")
-            return txt[:limit] + ("…" if len(txt) > limit else "")
-        except Exception as exc:
-            return f"<cannot read body: {exc}>"
-
+    
+    
+    
     @with_retries
     async def _get_twitter_connect_link(self) -> str:
         try:
             logger.info(f"[{self.account_index}] Getting Twitter connect link")
             params = {
-                "return_url": "https://www.dusted.app/rooms/monad-testnet/native",
+                "return_url": "https://www.dusted.app/rewards",
                 "jwt": self.auth_token,
             }
-            logger.debug(
-                f"[{self.account_index}] → GET https://api.xyz.land/auth/twitter "
-                f"params={params}"
-            )
-
             response = await self.session.get(
                 "https://api.xyz.land/auth/twitter",
                 params=params,
             )
-            
-
-            logger.debug(
-                f"[{self.account_index}] ← {response.status_code} url={response.url}"
-            )
-            logger.debug(
-                f"[{self.account_index}]  headers={dict(response.headers)}"
-            )
-            logger.debug(
-                f"[{self.account_index}]  body-preview={await self._body_preview(response)}"
-            )
-
             if response.status_code == 200:
-                logger.success(
-                    f"[{self.account_index}] Connect link received: {response.url}"
-                )
-                return str(response.url)
-            raise Exception(f"Unexpected status {response.status_code}")
+                return response.url
+            else:
+                raise Exception(f"[{self.account_index}] {response.status_code}")
 
         except Exception as e:
             logger.error(
                 f"[{self.account_index}] Error getting Twitter connect link: {e}"
             )
-            raise
-
+            raise e
 
     @with_retries
     async def authorize_twitter(
@@ -599,8 +569,8 @@ class Dusted:
         code_challenge: str,
         client_id: str,
         code_challenge_method: str,
-        headers: Dict[str, str],
-    ) -> bool:
+        headers: dict,
+    ) -> str:
         try:
             url = "https://x.com/i/api/2/oauth2/authorize"
             params = {
@@ -612,97 +582,104 @@ class Dusted:
                 "response_type": "code",
                 "redirect_uri": "https://api.xyz.land/auth/twitter/callback",
             }
-            logger.debug(f"[{self.account_index}] → GET {url} params={params}")
-            response = await self.session.get(url, params=params, headers=headers)
-            logger.debug(f"[{self.account_index}] ← {response.status_code}")
-            logger.debug(f"[{self.account_index}]  body={await self._body_preview(response)}")
-
-            auth_code = response.json()["auth_code"]
-            logger.debug(f"[{self.account_index}] Parsed auth_code={auth_code}")
-
-            data = {"approval": "true", "code": auth_code}
-            logger.debug(
-                f"[{self.account_index}] → POST {url} data={data}"
+            response = await self.session.get(
+                url,
+                params=params,
+                headers=headers,
             )
-            response = await self.session.post(url, headers=headers, data=data)
-            logger.debug(f"[{self.account_index}] ← {response.status_code}")
-            logger.debug(f"[{self.account_index}]  body={await self._body_preview(response)}")
-
-            redirect_url = response.json()["redirect_uri"]
-            logger.debug(f"[{self.account_index}] redirect_url={redirect_url}")
-
-            nav_headers = {
-                "user-agent": headers["user-agent"],
-                "referer": "https://x.com/",
+            
+            auth_code = response.json()['auth_code']
+            
+            data = {
+                'approval': 'true',
+                'code': auth_code,
             }
 
-            logger.debug(f"[{self.account_index}] → GET {redirect_url}")
-            response = await self.session.get(redirect_url, headers=nav_headers)
-            logger.debug(
-                f"[{self.account_index}] ← {response.status_code} (redirect callback)"
-            )
+            response = await self.session.post('https://x.com/i/api/2/oauth2/authorize', headers=headers, data=data)
 
-            params_success = {"x_link_success": "true"}
-            logger.debug(
-                f"[{self.account_index}] → GET https://www.dusted.app/rewards "
-                f"params={params_success}"
-            )
-            response = await self.session.get(
-                "https://www.dusted.app/rewards", params=params_success, headers=nav_headers
-            )
-            logger.debug(f"[{self.account_index}] ← {response.status_code}")
-            logger.debug(f"[{self.account_index}]  body={await self._body_preview(response)}")
+            redirect_url = response.json()['redirect_uri']
+
+            headers = {
+                'sec-ch-ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'upgrade-insecure-requests': '1',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'sec-fetch-site': 'cross-site',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-user': '?1',
+                'sec-fetch-dest': 'document',
+                'referer': 'https://x.com/',
+                'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8,ru;q=0.7,zh-TW;q=0.6,zh;q=0.5',
+                'priority': 'u=0, i',
+            }
+
+            response = await self.session.get(redirect_url, params=params, headers=headers)
+
+            headers = {
+                'upgrade-insecure-requests': '1',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'sec-fetch-site': 'cross-site',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-user': '?1',
+                'sec-fetch-dest': 'document',
+                'sec-ch-ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'referer': 'https://x.com/',
+                'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8,ru;q=0.7,zh-TW;q=0.6,zh;q=0.5',
+                'priority': 'u=0, i',
+            }
+
+            params = {
+                'x_link_success': 'true',
+            }
+
+            response = await self.session.get('https://www.dusted.app/rewards', params=params, headers=headers)
 
             if response.status_code == 200:
                 logger.success(f"[{self.account_index}] Twitter connected successfully")
                 return True
-            raise Exception(f"finish code {response.status_code}")
-
+            else:
+                raise Exception(f"[{self.account_index}] finish code {response.status_code}")
+            
         except Exception as e:
             logger.error(f"[{self.account_index}] Error authorizing Twitter: {e}")
-            raise
-
+            raise e
 
     @with_retries
-    async def connect_twitter(self) -> bool:
-        """Connect Twitter account with extremely verbose logs."""
+    async def connect_twitter(self) -> str:
+        """Connect Twitter account."""
         try:
             logger.info(f"[{self.account_index}] Connecting Twitter account")
 
-            csrf = secrets.token_hex(16)
-            cookies = {"ct0": csrf, "auth_token": self.twitter_token}
+            generated_csrf_token = secrets.token_hex(16)
+
+            cookies = {"ct0": generated_csrf_token, "auth_token": self.twitter_token}
             cookies_headers = "; ".join(f"{k}={v}" for k, v in cookies.items())
 
             headers = {
                 "cookie": cookies_headers,
-                "x-csrf-token": csrf,
-                "authorization": (
-                    "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs="
-                    "1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
-                ),
+                "x-csrf-token": generated_csrf_token,
+                "authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
                 "referer": "https://x.com/",
-                "user-agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "x-twitter-auth-type": (
+                    "OAuth2Session" if cookies.get("auth_token") else ""
                 ),
-                "x-twitter-auth-type": "OAuth2Session" if cookies.get("auth_token") else "",
             }
-            logger.debug(f"[{self.account_index}] Prepared initial headers: {headers}")
 
             connect_link = await self._get_twitter_connect_link()
-            logger.debug(f"[{self.account_index}] connect_link={connect_link}")
-
-            # Parse query parameters by simple string splits
             client_id = connect_link.split("client_id=")[1].split("&")[0]
             state = connect_link.split("state=")[1].split("&")[0]
             code_challenge = connect_link.split("code_challenge=")[1].split("&")[0]
-            code_challenge_method = connect_link.split("code_challenge_method=")[1].split("&")[0]
+            code_challenge_method = connect_link.split("code_challenge_method=")[
+                1
+            ].strip()
 
-            logger.debug(
-                f"[{self.account_index}] Extracted → client_id={client_id} "
-                f"state={state} code_challenge={code_challenge[:10]}… "
-                f"method={code_challenge_method}"
-            )
+            logger.info(f"[{self.account_index}] Authorizing Twitter. State: {state}")
 
             return await self.authorize_twitter(
                 state, code_challenge, client_id, code_challenge_method, headers
@@ -710,11 +687,7 @@ class Dusted:
 
         except Exception as e:
             logger.error(f"[{self.account_index}] Error connecting Twitter: {e}")
-            raise
-
-
-
-
+            raise e
 
 
     @with_retries
@@ -730,65 +703,77 @@ class Dusted:
 
             total_plays = 0
             total_score = 0
+            max_retries = 3
 
             # Try to play until no more plays remain
             try:
                 while True:
-                    logger.info(f"[{self.account_index}] Sending lasso play request")
+                    retry_count = 0
+                    successful = False
+                    
+                    while retry_count < max_retries and not successful:
+                        logger.info(f"[{self.account_index}] Sending lasso play request (attempt {retry_count+1}/{max_retries})")
+                        
+                        # Get auth headers and log them for debugging
+                        auth_headers = self.get_auth_headers()
+                        logger.debug(f"[{self.account_index}] Using auth headers: {auth_headers}")
 
-                    response = await self.session.post(
-                        "https://api.xyz.land/lasso/play?network=monad&chain_id=10143",
-                        params=params,
-                        headers=self.get_auth_headers(),
-                    )
-
-                    play_data = response.json()
-                    # logger.debug(f"[{self.account_index}] Lasso play response: {json.dumps(play_data, indent=2)}")
-
-                    # Check for error response indicating no more plays
-                    if "error" in play_data:
-                        error_msg = play_data.get("error")
-                        logger.warning(
-                            f"[{self.account_index}] Lasso play error: {error_msg}"
+                        response = await self.session.post(
+                            "https://api.xyz.land/lasso/play",
+                            params=params,
+                            headers=auth_headers,
                         )
-                        logger.info(
-                            f"[{self.account_index}] Already played all games or other error. Will still try to claim rewards."
-                        )
-                        break
 
-                    if "score" not in play_data or "remainingPlays" not in play_data:
-                        logger.warning(
-                            f"[{self.account_index}] Invalid lasso play response: {play_data}"
-                        )
-                        break
+                        play_data = response.json()
+                        
+                        # Handle Twitter connection error
+                        if "message" in play_data and "connect your Twitter" in play_data["message"]:
+                            if retry_count < max_retries - 1:
+                                wait_time = 5 * (retry_count + 1)  # Increasing delay between retries
+                                logger.warning(f"[{self.account_index}] Twitter connection not recognized. Retrying in {wait_time}s...")
+                                
+                                # Try refreshing the session before retry
+                                await self.refresh_session()
+                                
+                                await asyncio.sleep(wait_time)
+                                retry_count += 1
+                                continue
+                            else:
+                                logger.error(f"[{self.account_index}] Twitter connection issue persists after {max_retries} attempts")
+                                return 0
+                        
+                        successful = True  # If we got here without Twitter error, mark as successful
+                        
+                        # Check for error response indicating no more plays
+                        if "error" in play_data:
+                            error_msg = play_data.get("error")
+                            logger.warning(f"[{self.account_index}] Lasso play error: {error_msg}")
+                            logger.info(f"[{self.account_index}] Already played all games or other error. Will still try to claim rewards.")
+                            break
 
-                    score = play_data["score"]
-                    remaining_plays = play_data["remainingPlays"]
+                        if "score" not in play_data or "remainingPlays" not in play_data:
+                            logger.warning(f"[{self.account_index}] Invalid lasso play response: {play_data}")
+                            break
 
-                    total_plays += 1
-                    total_score += score
+                        score = play_data["score"]
+                        remaining_plays = play_data["remainingPlays"]
 
-                    logger.success(
-                        f"[{self.account_index}] Lasso play #{total_plays} - Score: {score}, Remaining plays: {remaining_plays}"
-                    )
+                        total_plays += 1
+                        total_score += score
 
-                    if remaining_plays <= 0:
-                        logger.info(
-                            f"[{self.account_index}] No more plays remaining. Total plays: {total_plays}, Total score: {total_score}"
-                        )
-                        break
+                        logger.success(f"[{self.account_index}] Lasso play #{total_plays} - Score: {score}, Remaining plays: {remaining_plays}")
 
-                    # Add a small delay between requests
-                    await asyncio.sleep(random.uniform(1, 3))
+                        if remaining_plays <= 0:
+                            logger.info(f"[{self.account_index}] No more plays remaining. Total plays: {total_plays}, Total score: {total_score}")
+                            break
+
+                        # Add a small delay between requests
+                        await asyncio.sleep(random.uniform(1, 3))
             except Exception as e:
-                logger.warning(
-                    f"[{self.account_index}] Error during lasso gameplay: {e}. Will still try to claim rewards."
-                )
+                logger.warning(f"[{self.account_index}] Error during lasso gameplay: {e}. Will still try to claim rewards.")
 
             if total_plays > 0:
-                logger.success(
-                    f"[{self.account_index}] Completed all lasso plays with total score: {total_score}"
-                )
+                logger.success(f"[{self.account_index}] Completed all lasso plays with total score: {total_score}")
             else:
                 logger.info(f"[{self.account_index}] No lasso plays were completed.")
 
@@ -799,12 +784,92 @@ class Dusted:
             # Don't raise the exception, return 0 score but still allow claiming
             return 0
 
+
+    @with_retries
+    async def claim_rewards(self) -> bool:
+        """Claim rewards from the Dusted platform."""
+        try:
+            logger.info(f"[{self.account_index}] Attempting to claim rewards")
+
+            # Prepare parameters for the claim request
+            params = {
+                "network": "monad",
+                "chain_id": "10143",
+            }
+
+            max_retries = 3
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                # Get the claim signature
+                logger.info(f"[{self.account_index}] Requesting claim signature (attempt {retry_count+1}/{max_retries})")
+                
+                auth_headers = self.get_auth_headers()
+                logger.debug(f"[{self.account_index}] Using auth headers for claim: {auth_headers}")
+                
+                response = await self.session.post(
+                    "https://api.xyz.land/lasso/claim",
+                    params=params,
+                    headers=auth_headers,
+                )
+
+                claim_data = response.json()
+                
+                # Handle Twitter connection error
+                if "message" in claim_data and "connect your Twitter" in claim_data["message"]:
+                    if retry_count < max_retries - 1:
+                        wait_time = 5 * (retry_count + 1)
+                        logger.warning(f"[{self.account_index}] Twitter connection not recognized for claiming. Retrying in {wait_time}s...")
+                        
+                        # Try refreshing session before retry
+                        await self.refresh_session()
+                        
+                        await asyncio.sleep(wait_time)
+                        retry_count += 1
+                        continue
+                    else:
+                        logger.error(f"[{self.account_index}] Twitter connection issue persists for claiming after {max_retries} attempts")
+                        return False
+                
+                # Process successful response
+                if "signature" in claim_data:
+                    signature = claim_data["signature"]
+                    logger.success(f"[{self.account_index}] Retrieved claim signature")
+
+                    # Claim contract call
+                    tx_hash, receipt = await self._claim_on_chain(signature)
+                    
+                    if receipt["status"] == 1:
+                        logger.success(f"[{self.account_index}] Successfully claimed rewards!")
+                        return True
+                    else:
+                        logger.error(f"[{self.account_index}] Claim transaction failed")
+                        return False
+                else:
+                    logger.warning(f"[{self.account_index}] Invalid claim response: {claim_data}")
+                    
+                    if retry_count < max_retries - 1:
+                        wait_time = 5 * (retry_count + 1)
+                        logger.warning(f"[{self.account_index}] Retrying claim in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                        retry_count += 1
+                    else:
+                        return False
+                    
+            return False
+
+        except Exception as e:
+            logger.error(f"[{self.account_index}] Error in claim_rewards: {e}")
+            return False
+
+
     @with_retries
     async def get_lasso_score(self) -> Dict:
         """Get the current lasso score, remaining plays and rank information."""
         try:
             logger.info(f"[{self.account_index}] Fetching lasso score information")
 
+            
             score_response = await self.session.get(
                 "https://api.xyz.land/lasso/score", headers=self.get_auth_headers()
             )
